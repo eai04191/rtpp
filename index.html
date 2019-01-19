@@ -1,0 +1,219 @@
+
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: #66ccff;
+    font-size: 16px;
+  }
+
+  p {
+    margin: 0;
+    color: white;
+    text-align: center;
+    text-shadow: 2px 2px 2px #000000;
+    font-family: "Montserrat", sans-serif;
+  }
+
+  p:first-of-type {
+    margin-top: 0;
+  }
+
+  p:last-of-type {
+    margin-bottom: 0;
+  }
+
+  #pp-lable {
+    font-size: 48px;
+    margin-bottom: 1rem;
+  }
+
+  #hit-count-lable {
+    font-size: 24px;
+    margin-bottom: .5rem;
+  }
+
+  #bpm-lable {
+    font-size: 24px;
+  }
+</style>
+    
+<body>
+  <p id="pp-lable">0.00pp</p>
+  <p id="hit-count-lable">0x100 0x50 0xMiss</p>
+  <p id="bpm-lable">BPM: </p>
+</body>
+
+<script src='https://oddr.kedamaovo.moe/js/ODDR.js'></script>
+<script src='https://oddr.kedamaovo.moe/js/rtppd/RTPPD.js'></script>
+<script src='https://oddr.kedamaovo.moe/js/ORTDP.js'></script>
+<script src='https://oddr.kedamaovo.moe/js/Smoother.js'></script>
+<script src='https://oddr.kedamaovo.moe/js/rtppd/Formatter.js'></script>
+<script src='https://oddr.kedamaovo.moe/js/Beatmap.js'></script>
+<script >
+(async function() {
+   let html_hit_count = document.querySelector("#hit-count-lable");
+   let html_pp = document.querySelector("#pp-lable");
+
+   let _url = new URL(window.location.href);
+   let host = _url.searchParams.get("host");
+   let port = _url.searchParams.get("port");
+   let digits = _url.searchParams.get("digits");
+
+   if (host === null) host = "localhost";
+   if (port === null) port = "10800";
+   if (digits === null) digits = "2";
+
+   digits = Number.parseInt(digits);
+
+   const st = 0.2;
+   const fps = 30;
+   const dt = 1.0 / fps;
+   const render_interval = dt * 1000;
+   const get_interval = 200;
+
+   let current_pp = null;
+   let target_pp = null;
+
+   let hit_count = null;
+   let beatmapTuple = null;
+
+   let smoothers = {};
+   let pp_formatter = null;
+   let hit_count_formatter = null;
+   let status = 0;
+
+   //initialize ODDR and RTPPD
+   let oddr = new ODDR(host, port);
+   let rtppd = new RTPPD(oddr);
+   let ortdp = new ORTDP(oddr);
+
+   //get pp format and hit count format
+   rtppd.getPerformancePointFormatString().then(function(format_json) {
+      pp_formatter = new Formatter(format_json.format, digits);
+   });
+
+   rtppd.getHitCountFormatString().then(function(format_json) {
+      hit_count_formatter = new Formatter(format_json.format, 0);
+   });
+
+   //smooth function
+   function SmoothObject(previous, target) {
+      for (let prop in target) {
+         if (smoothers[prop] === undefined)
+            smoothers[prop] = new Smoother(st, dt);
+         previous[prop] = smoothers[prop].SmoothDamp(
+            previous[prop],
+            target[prop]
+         );
+      }
+      return previous;
+   }
+
+   //get pp and hit count data
+   async function get_data() {
+      target_pp = await rtppd.getPerformancePointAt(0);
+      if (current_pp === null) current_pp = target_pp;
+
+      hit_count = await rtppd.getHitCountAt(0);
+      beatmapTuple = await rtppd.getBeatmapTupleAt(0);
+      beatmapTuple.time = (await ortdp.getPlayingTime()).time;
+      status = (await ortdp.getGameStatusAt()).status;
+
+      if (status == ortdp.STATUS_PLAYING) {
+         let tuple = Object.assign(current_pp, hit_count);
+         tuple = Object.assign(tuple, beatmapTuple);
+
+         if (hit_count !== null)
+            if (hit_count_formatter != null)
+               html_hit_count.textContent = hit_count_formatter.Format(tuple);
+      }
+
+      setTimeout(get_data, get_interval);
+   }
+
+   //display function
+   async function display_content() {
+      if (status == ortdp.STATUS_PLAYING) {
+         let tuple = Object.assign(current_pp, hit_count);
+         tuple = Object.assign(tuple, beatmapTuple);
+
+         if (current_pp !== null) {
+            current_pp = SmoothObject(current_pp, target_pp);
+            if (pp_formatter != null)
+               html_pp.textContent = pp_formatter.Format(tuple);
+         }
+      }
+
+      if (status != ortdp.STATUS_RANK && status != ortdp.STATUS_PLAYING) {
+         html_pp.textContent = "";
+         html_hit_count.textContent = "";
+         if (pp_formatter != null) pp_formatter.resetVariables();
+         if (hit_count_formatter != null) hit_count_formatter.resetVariables();
+      }
+      setTimeout(display_content, render_interval);
+   }
+
+   get_data();
+   display_content();
+})();
+
+window.onload = function() {
+   let _url = new URL(window.location.href);
+   let host = _url.searchParams.get("host") || "localhost";
+   let port = _url.searchParams.get("port") || "10800";
+
+   let oddr = new ODDR(host, port);
+   let ortdp = new ORTDP(oddr);
+
+   let lastBeatmapInfo = {};
+   let beatmap = {};
+   let bpmLabel = document.querySelector("#bpm-lable");
+
+   async function loop() {
+      let status = await ortdp.getGameStatusAt(0);
+      if (status != null) {
+         let mods = {};
+
+         if (status.statusText == "Playing" || ortdp.isListening(status)) {
+            let beatmapInfo = await ortdp.getBeatmapInfo();
+
+            if (!beatmapInfo.equals(lastBeatmapInfo)) {
+               let beatmapText = await ortdp.getBeatmap();
+               if (!/no found beatmap file/.test(beatmapText)) {
+                  beatmap = new Beatmap(beatmapText);
+                  lastBeatmapInfo = beatmapInfo;
+               }
+            }
+
+            if (status.statusText == "Playing") {
+               let time = (await ortdp.getPlayingTime()).time;
+               let mods = await ortdp.getPlayingModsAt(0);
+
+               let timing = beatmap.getTiming(time) || { bpm: 0 };
+
+               bpmLabel.textContent =
+                  "BPM: " + Math.round(Math.round(timing.bpm) * mods.timeRate);
+            } else if (ortdp.isListening(status)) {
+               let timing = beatmap.getTiming(0);
+               let mods = await ortdp.getPlayingModsAt(0);
+
+               let minBpm = Math.round(beatmap.minBpm);
+               let maxBpm = Math.round(beatmap.maxBpm);
+
+               if (mods.mods != 0xffffffff) {
+                  minBpm = Math.round(minBpm * mods.timeRate);
+                  maxBpm = Math.round(maxBpm * mods.timeRate);
+               }
+
+               if (maxBpm == minBpm) bpmLabel.textContent = "BPM: " + minBpm;
+               else bpmLabel.textContent = `BPM: ${minBpm} - ${maxBpm}`;
+            }
+         }
+      }
+      setTimeout(loop, 300);
+   }
+
+   loop();
+};
+</script>
